@@ -8,22 +8,20 @@ import hmac
 import ssl
 import signal
 
-# --- Pustaka untuk HD Wallet ---
+
 from hdwallet import HDWallet
 from mnemonic import Mnemonic as Bip39Mnemonic
 
-# Definisikan simbol OCTRA untuk hdwallet.
-# PENTING: Anda HARUS mengkonfirmasi tipe koin BIP44 yang benar untuk Octra.
-# 60 adalah tipe koin Ethereum, digunakan di sini sebagai placeholder/fallback.
+
 class OCTRA:
     BIP44_COIN_TYPE = 60
 
-# --- Variabel Global ---
+
 c = {'r': '\033[0m', 'b': '\033[34m', 'c': '\033[36m', 'g': '\033[32m', 'y': '\033[33m', 'R': '\033[31m', 'B': '\033[1m', 'bg': '\033[44m', 'bgr': '\033[41m', 'bgg': '\033[42m', 'w': '\033[37m'}
 
-loaded_accounts = [] # List untuk menyimpan semua akun yang dimuat
-current_account_idx = -1 # Indeks akun yang sedang aktif
-rpc = 'https://octra.network' # URL RPC Octra
+loaded_accounts = [] 
+current_account_idx = -1 
+rpc = 'https://octra.network' 
 
 sk, pub = None, None
 b58 = re.compile(r"^oct[1-9A-HJ-NP-Za-km-z]{44}$")
@@ -49,26 +47,26 @@ def fill():
     print(f"{c['bg']}", end='')
     for _ in range(cr[1]):
         print(" " * cr[0])
-    print("\033[H", end='') # Pindahkan kursor ke pojok kiri atas
+    print("\033[H", end='') 
 
 def box(x, y, w, h, t=""):
     """Menggambar kotak di terminal pada posisi x,y dengan lebar w dan tinggi h, opsional dengan judul."""
-    # Cetak garis atas
+    
     print(f"\033[{y};{x}H{c['bg']}{c['w']}┌{'─' * (w - 2)}┐{c['bg']}")
     if t:
-        # Jika ada judul, cetak di tengah atas garis kotak
+        
         display_t = f" {c['B']}{t} {c['w']}"
         if len(display_t) > (w - 2):
             display_t = display_t[:w-2]
         
-        # Posisikan ulang untuk menimpa bagian atas kotak dengan judul
+        
         print(f"\033[{y};{x}H{c['bg']}{c['w']}┤{display_t.ljust(w - 2)}{c['w']}├{c['bg']}")
         
-    # Cetak sisi kiri dan kanan
+    
     for i in range(1, h - 1):
         print(f"\033[{y + i};{x}H{c['bg']}{c['w']}│{' ' * (w - 2)}│{c['bg']}")
     
-    # Cetak garis bawah
+    
     print(f"\033[{y + h - 1};{x}H{c['bg']}{c['w']}└{'─' * (w - 2)}┘{c['bg']}")
 
 def at(x, y, t, cl=''):
@@ -102,7 +100,7 @@ async def spin_animation(x, y, msg):
     except asyncio.CancelledError:
         at(x, y, " " * (len(msg) + 3), "")
 
-# --- Fungsi Manajemen Akun ---
+
 
 def derive_octra_keys(seed_or_private_key_input, path="m/44'/60'/0'/0/0"):
     """
@@ -110,8 +108,7 @@ def derive_octra_keys(seed_or_private_key_input, path="m/44'/60'/0'/0/0"):
     Mengembalikan: (nacl.signing.SigningKey object, pub_key_b64 string, octra_address string)
     """
     try:
-        # 1. Coba sebagai Private Key Base64 (32-byte Ed25519 seed)
-        # Base64 encoded 32-byte bisa ~43-44 karakter. Periksa padding '='.
+
         if len(seed_or_private_key_input) >= 43 and '=' in seed_or_private_key_input:
             try:
                 priv_bytes = base64.b64decode(seed_or_private_key_input)
@@ -122,23 +119,21 @@ def derive_octra_keys(seed_or_private_key_input, path="m/44'/60'/0'/0/0"):
                 verify_key = sk.verify_key
                 pub_key_b64 = base64.b64encode(verify_key.encode()).decode()
                 
-                # Asumsi format alamat Octra: "oct" + Base64(SHA256(public_key_raw_bytes))
+                
                 address_raw_bytes = hashlib.sha256(verify_key.encode()).digest()
                 octra_address = "oct" + base64.b64encode(address_raw_bytes).decode()
                 
                 return sk, pub_key_b64, octra_address
             except Exception:
-                pass # Lanjut coba sebagai seed phrase jika gagal sebagai private key
+                pass 
 
-        # 2. Coba sebagai Seed Phrase
+        
         if Bip39Mnemonic.check(seed_or_private_key_input):
             try:
-                # Menggunakan koin Ed25519 yang dikenal seperti TRON (BIP44_COIN_TYPE = 195) untuk derivasi.
-                # Ini adalah upaya untuk mendapatkan kunci Ed25519 yang valid dari seed menggunakan hdwallet.
-                # Jika Octra memiliki coin_type dan path-nya sendiri, Anda harus menggunakannya di sini.
+
                 hdwallet_ed25519 = HDWallet(symbol="TRON") 
                 hdwallet_ed25519.from_mnemonic(mnemonic=seed_or_private_key_input)
-                hdwallet_ed25519.from_path(path="m/44'/195'/0'/0/0") # Path standar TRON
+                hdwallet_ed25519.from_path(path="m/44'/195'/0'/0/0") 
                 
                 private_key_hex = hdwallet_ed25519.private_key()
                 if not private_key_hex:
@@ -153,7 +148,7 @@ def derive_octra_keys(seed_or_private_key_input, path="m/44'/60'/0'/0/0"):
                 verify_key = sk.verify_key
                 pub_key_b64 = base64.b64encode(verify_key.encode()).decode()
                 
-                # Logika derivasi alamat Octra yang diasumsikan
+                
                 address_raw_bytes = hashlib.sha256(verify_key.encode()).digest()
                 octra_address = "oct" + base64.b64encode(address_raw_bytes).decode()
                 
@@ -161,8 +156,8 @@ def derive_octra_keys(seed_or_private_key_input, path="m/44'/60'/0'/0/0"):
             except Exception:
                 return None, None, None 
         else:
-            return None, None, None # Bukan seed phrase yang valid
-    except Exception: # Tangkap semua error lain yang tidak terduga dalam logika fungsi
+            return None, None, None 
+    except Exception: 
         return None, None, None
 
 async def add_account_ui():
@@ -206,15 +201,15 @@ async def add_account_ui():
     if sk_obj and octra_addr and pub_key_b64:
         loaded_accounts.append({
             'name': account_name,
-            'priv_raw': input_value, # Simpan raw input - JANGAN simpan dalam file tanpa enkripsi!
-            'priv': base64.b64encode(sk_obj.encode()).decode(), # Ini akan digunakan untuk signing
+            'priv_raw': input_value, 
+            'priv': base64.b64encode(sk_obj.encode()).decode(), 
             'addr': octra_addr,
             'pub': pub_key_b64,
-            'sk_obj': sk_obj # Simpan objek SigningKey langsung
+            'sk_obj': sk_obj 
         })
         at(x + 2, y + 15, f"✓ Akun '{account_name}' ({octra_addr[:10]}...) berhasil ditambahkan!", c['bgg'] + c['w'])
         global current_account_idx
-        if current_account_idx == -1: # Jika ini akun pertama, jadikan aktif
+        if current_account_idx == -1: 
             current_account_idx = 0
             set_active_account(0)
     else:
@@ -232,7 +227,7 @@ def set_active_account(idx):
         globals()['sk'] = active_account['sk_obj']
         globals()['pub'] = active_account['pub']
         
-        # Reset cache saldo dan riwayat untuk akun baru
+        
         cb, cn, lu, lh = None, None, 0, 0
         h.clear()
         
@@ -275,7 +270,7 @@ async def switch_account_ui():
         at(x + 2, y + 4 + len(loaded_accounts) + 4, "✗ Masukkan nomor yang valid.", c['bgr'] + c['w'])
     wait_sync()
 
-# --- Fungsi Muat Dompet (Dimodifikasi untuk multi-akun dari wallet.json) ---
+
 def ld():
     """
     Mencoba memuat akun dari wallet.json.
@@ -283,7 +278,7 @@ def ld():
     """
     global priv, addr, rpc, sk, pub, loaded_accounts, current_account_idx
     
-    # Kosongkan daftar akun yang sudah dimuat sebelumnya
+    
     loaded_accounts.clear() 
     current_account_idx = -1
 
@@ -295,12 +290,12 @@ def ld():
         with open(wallet_path, 'r') as f:
             data = json.load(f)
         
-        # Periksa apakah data adalah daftar (multi-akun) atau objek tunggal (satu akun lama)
+        
         wallets_to_load = []
         if isinstance(data, list):
             wallets_to_load = data
         elif isinstance(data, dict):
-            # Jika itu objek tunggal (format lama), bungkus dalam daftar
+            
             wallets_to_load.append(data)
         else:
             print(f"{c['R']}Error: Format wallet.json tidak dikenal (bukan objek atau daftar).{c['r']}")
@@ -308,45 +303,45 @@ def ld():
 
         if not wallets_to_load:
             print(f"{c['y']}Peringatan: wallet.json kosong atau tidak berisi akun. Anda perlu menambah akun secara manual (opsi 'A').{c['r']}")
-            return True # Izinkan skrip untuk melanjutkan
+            return True 
 
         accounts_loaded_count = 0
         for i, d in enumerate(wallets_to_load):
             priv_b64 = d.get('priv')
             loaded_addr = d.get('addr')
-            loaded_rpc_per_account = d.get('rpc', 'https://octra.network') # RPC bisa per akun
+            loaded_rpc_per_account = d.get('rpc', 'https://octra.network') 
 
             if not priv_b64 or not loaded_addr:
                 print(f"{c['y']}Peringatan: Akun ke-{i+1} di wallet.json tidak lengkap (kunci/alamat hilang). Melewati.{c['r']}")
                 continue
 
             try:
-                # Coba turunkan kunci dari priv_b64 yang diberikan (asumsi itu adalah seed)
+                
                 sk_obj, derived_pub_b64, derived_octra_addr = derive_octra_keys(priv_b64)
 
-                if not sk_obj: # Jika derivasi gagal
+                if not sk_obj: 
                     print(f"{c['R']}Error: Private key di akun ke-{i+1} wallet.json tidak valid atau tidak kompatibel. Melewati.{c['r']}")
                     continue
                 
-                account_name = d.get('name', f"wallet.json_account_{i+1}") # Ambil nama atau buat default
+                account_name = d.get('name', f"wallet.json_account_{i+1}") 
 
                 loaded_accounts.append({
                     'name': account_name,
                     'priv_raw': priv_b64, 
                     'priv': priv_b64,
-                    'addr': loaded_addr, # Gunakan alamat dari file (penting untuk kesesuaian saldo)
-                    'pub': derived_pub_b64, # Gunakan public key yang baru saja diturunkan
+                    'addr': loaded_addr, 
+                    'pub': derived_pub_b64, 
                     'sk_obj': sk_obj
                 })
                 accounts_loaded_count += 1
 
-                # Peringatan jika alamat yang diturunkan berbeda dengan yang di file
+                
                 if derived_octra_addr != loaded_addr:
                     print(f"{c['y']}Peringatan ({account_name}): Alamat dari wallet.json ({loaded_addr}) berbeda dengan yang diturunkan ({derived_octra_addr}).{c['r']}")
                     print(f"{c['y']}Ini bisa berarti skema derivasi alamat Octra berbeda. Periksa saldo di Octra Explorer untuk {loaded_addr}.{c['r']}")
-                    time.sleep(1) # Beri waktu pengguna untuk membaca peringatan
+                    time.sleep(1) #
                 
-                # Gunakan RPC dari akun pertama yang berhasil dimuat sebagai default global
+                
                 if accounts_loaded_count == 1:
                     globals()['rpc'] = loaded_rpc_per_account
                     if not loaded_rpc_per_account.startswith('https://') and 'localhost' not in loaded_rpc_per_account:
@@ -359,17 +354,17 @@ def ld():
 
         if accounts_loaded_count == 0:
             print(f"{c['y']}Peringatan: Tidak ada akun yang berhasil dimuat dari wallet.json. Anda perlu menambah akun secara manual (opsi 'A').{c['r']}")
-            return True # Izinkan skrip untuk melanjutkan
+            return True 
 
         current_account_idx = 0
-        set_active_account(0) # Atur akun pertama yang dimuat sebagai aktif
+        set_active_account(0) 
         print(f"{c['g']}✓ {accounts_loaded_count} akun berhasil dimuat dari wallet.json.{c['r']}")
-        time.sleep(2) # Beri waktu pengguna untuk melihat pesan
+        time.sleep(2) 
         return True
 
     except FileNotFoundError:
         print(f"{c['y']}Peringatan: wallet.json tidak ditemukan. Anda perlu menambah akun secara manual (opsi 'A').{c['r']}")
-        return True # Izinkan skrip untuk melanjutkan
+        return True 
     except json.JSONDecodeError:
         print(f"{c['R']}Error: wallet.json tidak valid (format JSON rusak).{c['r']}")
         return False
@@ -377,7 +372,7 @@ def ld():
         print(f"{c['R']}Error umum saat memuat wallet.json: {e}{c['r']}")
         return False
 
-# --- Fungsi Kriptografi dan RPC ---
+
 
 def derive_encryption_key(privkey_b64):
     privkey_bytes = base64.b64decode(privkey_b64)
@@ -931,7 +926,7 @@ async def scr():
     cr = sz()
     cls()
     fill()
-    t = f" octra client v0.1.0 (private, multi-account) │ {datetime.now().strftime('%H:%M:%S')} "
+    t = f" Octra Pre client Testnet multi-account By Kazmight │ {datetime.now().strftime('%H:%M:%S')} "
     at((cr[0] - len(t)) // 2, 1, t, c['B'] + c['w'])
     
     sidebar_w = 28
@@ -1671,9 +1666,9 @@ async def main():
             elif cmd == '9':
                 h.clear()
                 lh = 0
-            elif cmd.lower() == 'a': # Tambah Akun
+            elif cmd.lower() == 'a': 
                 await add_account_ui()
-            elif cmd.lower() == 's': # Ganti Akun
+            elif cmd.lower() == 's': 
                 await switch_account_ui()
             elif cmd in ['0', 'q', '']:
                 break
