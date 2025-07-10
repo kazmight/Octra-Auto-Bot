@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Octra Main",
+    "priv": "MASUKKAN_PRIVATE_KEY_BASE64_AKUN",
+    "addr": "octxxxxxxxxxxxxxxxxx",
+    "rpc": "https://octra.network"
+  },
+  {
+    "name": "Octra Secondary",
+    "priv": "MASUKKAN_PRIVATE_KEY_BASE64_AKUN_LAINNYA",
+    "addr": "octxxxxxxxxxxxxxxxx",
+    "rpc": "https://octra.network"
+  }
+]
+
+TAMBAHKAN JIKA INGIN LEBIH BANYAK WALLET 
