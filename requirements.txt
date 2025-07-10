@@ -1,0 +1,6 @@
+mnemonic
+pycryptodomex
+aiohttp
+hdwallet
+PyNaCl
+cryptography
