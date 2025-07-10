@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json, base64, hashlib, time, sys, re, os, shutil, asyncio, aiohttp, threading
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
 import nacl.signing
 import secrets
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -9,61 +8,82 @@ import hmac
 import ssl
 import signal
 
-# --- Pustaka baru untuk HD Wallet ---
-from bip39 import Mnemonic
+# --- Pustaka untuk HD Wallet ---
 from hdwallet import HDWallet
-# Perlu mendefinisikan simbol OCTRA jika belum ada di hdwallet
-class OCTRA:
-    # Ini adalah placeholder. Anda HARUS mengkonfirmasi BIP44 coin type yang benar untuk Octra.
-    # 60 adalah coin type Ethereum, digunakan di sini sebagai contoh/fallback.
-    BIP44_COIN_TYPE = 60 
+from mnemonic import Mnemonic as Bip39Mnemonic
 
-# --- Variabel Global yang Dimodifikasi ---
+# Definisikan simbol OCTRA untuk hdwallet.
+# PENTING: Anda HARUS mengkonfirmasi tipe koin BIP44 yang benar untuk Octra.
+# 60 adalah tipe koin Ethereum, digunakan di sini sebagai placeholder/fallback.
+class OCTRA:
+    BIP44_COIN_TYPE = 60
+
+# --- Variabel Global ---
 c = {'r': '\033[0m', 'b': '\033[34m', 'c': '\033[36m', 'g': '\033[32m', 'y': '\033[33m', 'R': '\033[31m', 'B': '\033[1m', 'bg': '\033[44m', 'bgr': '\033[41m', 'bgg': '\033[42m', 'w': '\033[37m'}
 
-# List untuk menyimpan semua akun yang dimuat
-# Setiap elemen adalah dictionary: {'name': '...', 'priv': '...', 'addr': '...', 'pub': '...', 'sk_obj': nacl.signing.SigningKey object}
-loaded_accounts = []
+loaded_accounts = [] # List untuk menyimpan semua akun yang dimuat
 current_account_idx = -1 # Indeks akun yang sedang aktif
-# --- PERUBAHAN DI SINI: RPC diatur ke 'https://octra.network' ---
-rpc = 'https://octra.network' # RPC bisa sama untuk semua akun atau diatur per akun
-# --- Akhir Variabel Global yang Dimodifikasi ---
+rpc = 'https://octra.network' # URL RPC Octra
 
-sk, pub = None, None # Ini akan menjadi objek dan string pubkey dari akun aktif
+sk, pub = None, None
 b58 = re.compile(r"^oct[1-9A-HJ-NP-Za-km-z]{44}$")
 μ = 1_000_000
-h = [] # Transaction history, mungkin perlu disesuaikan untuk multi-akun jika ingin menampilkan history semua akun
+h = []
 cb, cn, lu, lh = None, None, 0, 0
 session = None
-executor = ThreadPoolExecutor(max_workers=1)
 stop_flag = threading.Event()
 spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 spinner_idx = 0
 
 def cls():
+    """Menghapus layar konsol."""
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def sz():
+    """Mengembalikan ukuran terminal."""
     return shutil.get_terminal_size((80, 25))
 
+def fill():
+    """Mengisi seluruh layar terminal dengan spasi latar belakang."""
+    cr = sz()
+    print(f"{c['bg']}", end='')
+    for _ in range(cr[1]):
+        print(" " * cr[0])
+    print("\033[H", end='') # Pindahkan kursor ke pojok kiri atas
+
+def box(x, y, w, h, t=""):
+    """Menggambar kotak di terminal pada posisi x,y dengan lebar w dan tinggi h, opsional dengan judul."""
+    # Cetak garis atas
+    print(f"\033[{y};{x}H{c['bg']}{c['w']}┌{'─' * (w - 2)}┐{c['bg']}")
+    if t:
+        # Jika ada judul, cetak di tengah atas garis kotak
+        display_t = f" {c['B']}{t} {c['w']}"
+        if len(display_t) > (w - 2):
+            display_t = display_t[:w-2]
+        
+        # Posisikan ulang untuk menimpa bagian atas kotak dengan judul
+        print(f"\033[{y};{x}H{c['bg']}{c['w']}┤{display_t.ljust(w - 2)}{c['w']}├{c['bg']}")
+        
+    # Cetak sisi kiri dan kanan
+    for i in range(1, h - 1):
+        print(f"\033[{y + i};{x}H{c['bg']}{c['w']}│{' ' * (w - 2)}│{c['bg']}")
+    
+    # Cetak garis bawah
+    print(f"\033[{y + h - 1};{x}H{c['bg']}{c['w']}└{'─' * (w - 2)}┘{c['bg']}")
+
 def at(x, y, t, cl=''):
+    """Mencetak teks pada posisi x,y di konsol dengan warna opsional."""
     print(f"\033[{y};{x}H{c['bg']}{cl}{t}{c['bg']}", end='')
 
-def inp(x, y):
+def inp_sync(x, y):
+    """Mengambil input sinkron dari pengguna pada posisi x,y."""
     print(f"\033[{y};{x}H", end='', flush=True)
     return input()
 
-async def ainp(x, y):
-    print(f"\033[{y};{x}H", end='', flush=True)
-    try:
-        return await asyncio.get_event_loop().run_in_executor(executor, input)
-    except:
-        stop_flag.set()
-        return ''
-
-def wait():
+def wait_sync():
+    """Menunggu pengguna menekan enter untuk melanjutkan."""
     cr = sz()
-    msg = "press enter to continue..."
+    msg = "tekan enter untuk melanjutkan..."
     msg_len = len(msg)
     y_pos = cr[1] - 2
     x_pos = max(2, (cr[0] - msg_len) // 2)
@@ -71,20 +91,8 @@ def wait():
     print(f"\033[{y_pos};{x_pos + msg_len}H", end='', flush=True)
     input()
 
-async def awaitkey():
-    cr = sz()
-    msg = "press enter to continue..."
-    msg_len = len(msg)
-    y_pos = cr[1] - 2
-    x_pos = max(2, (cr[0] - msg_len) // 2)
-    at(x_pos, y_pos, msg, c['y'])
-    print(f"\033[{y_pos};{x_pos + msg_len}H{c['bg']}", end='', flush=True)
-    try:
-        await asyncio.get_event_loop().run_in_executor(executor, input)
-    except:
-        stop_flag.set()
-
 async def spin_animation(x, y, msg):
+    """Menampilkan animasi berputar di konsol."""
     global spinner_idx
     try:
         while True:
@@ -94,46 +102,71 @@ async def spin_animation(x, y, msg):
     except asyncio.CancelledError:
         at(x, y, " " * (len(msg) + 3), "")
 
-# --- Fungsi Manajemen Akun Baru ---
+# --- Fungsi Manajemen Akun ---
 
-def derive_octra_keys(seed_or_private_key, path="m/44'/60'/0'/0/0"): # Contoh path BIP44 Ethereum
+def derive_octra_keys(seed_or_private_key_input, path="m/44'/60'/0'/0/0"):
     """
-    Mendapatkan kunci privat dan alamat Octra dari seed phrase atau private key.
-    Catatan: Anda perlu mengkonfirmasi path derivasi yang benar untuk Octra.
-    Saat ini menggunakan path Ethereum sebagai placeholder.
+    Menurunkan kunci privat dan alamat Octra dari seed phrase atau private key Base64.
+    Mengembalikan: (nacl.signing.SigningKey object, pub_key_b64 string, octra_address string)
     """
     try:
-        # Jika itu private key (asumsi base64 encoded)
-        if len(seed_or_private_key) > 64 and '=' in seed_or_private_key: # Heuristic untuk base64
-            priv_bytes = base64.b64decode(seed_or_private_key)
-            sk = nacl.signing.SigningKey(priv_bytes)
-            verify_key = sk.verify_key
-            address = "oct" + base64.b64encode(hashlib.sha256(verify_key.encode()).digest()).decode()
-            return sk, base64.b64encode(verify_key.encode()).decode(), address
+        # 1. Coba sebagai Private Key Base64 (32-byte Ed25519 seed)
+        # Base64 encoded 32-byte bisa ~43-44 karakter. Periksa padding '='.
+        if len(seed_or_private_key_input) >= 43 and '=' in seed_or_private_key_input:
+            try:
+                priv_bytes = base64.b64decode(seed_or_private_key_input)
+                if len(priv_bytes) != 32:
+                    raise ValueError(f"Panjang byte kunci privat adalah {len(priv_bytes)}, diharapkan 32 untuk seed Ed25519.")
+                
+                sk = nacl.signing.SigningKey(priv_bytes)
+                verify_key = sk.verify_key
+                pub_key_b64 = base64.b64encode(verify_key.encode()).decode()
+                
+                # Asumsi format alamat Octra: "oct" + Base64(SHA256(public_key_raw_bytes))
+                address_raw_bytes = hashlib.sha256(verify_key.encode()).digest()
+                octra_address = "oct" + base64.b64encode(address_raw_bytes).decode()
+                
+                return sk, pub_key_b64, octra_address
+            except Exception:
+                pass # Lanjut coba sebagai seed phrase jika gagal sebagai private key
 
-        # Jika itu seed phrase
-        if Mnemonic.check(seed_or_private_key):
-            hdwallet = HDWallet(symbol=OCTRA) # Asumsi OCTRA didefinisikan
-            hdwallet.from_mnemonic(mnemonic=seed_or_private_key)
-            hdwallet.from_path(path=path) # Derivasi kunci
-            private_key_bytes = bytes.fromhex(hdwallet.private_key()) # Kunci privat heksadesimal
-            
-            sk = nacl.signing.SigningKey(private_key_bytes)
-            verify_key = sk.verify_key
-            
-            # Format alamat Octra perlu dikonfirmasi
-            # Ini adalah *perkiraan* berdasarkan format yang terlihat di skrip asli
-            address_raw_bytes = hashlib.sha256(verify_key.encode()).digest()
-            address = "oct" + base64.b64encode(address_raw_bytes).decode()
-            
-            return sk, base64.b64encode(verify_key.encode()).decode(), address
+        # 2. Coba sebagai Seed Phrase
+        if Bip39Mnemonic.check(seed_or_private_key_input):
+            try:
+                # Menggunakan koin Ed25519 yang dikenal seperti TRON (BIP44_COIN_TYPE = 195) untuk derivasi.
+                # Ini adalah upaya untuk mendapatkan kunci Ed25519 yang valid dari seed menggunakan hdwallet.
+                # Jika Octra memiliki coin_type dan path-nya sendiri, Anda harus menggunakannya di sini.
+                hdwallet_ed25519 = HDWallet(symbol="TRON") 
+                hdwallet_ed25519.from_mnemonic(mnemonic=seed_or_private_key_input)
+                hdwallet_ed25519.from_path(path="m/44'/195'/0'/0/0") # Path standar TRON
+                
+                private_key_hex = hdwallet_ed25519.private_key()
+                if not private_key_hex:
+                    raise ValueError("HDWallet tidak menghasilkan kunci privat untuk Ed25519.")
+                
+                private_key_bytes = bytes.fromhex(private_key_hex)
+                
+                if len(private_key_bytes) != 32:
+                    raise ValueError(f"Kunci privat Ed25519 yang diturunkan adalah {len(private_key_bytes)} byte, diharapkan 32.")
+
+                sk = nacl.signing.SigningKey(private_key_bytes)
+                verify_key = sk.verify_key
+                pub_key_b64 = base64.b64encode(verify_key.encode()).decode()
+                
+                # Logika derivasi alamat Octra yang diasumsikan
+                address_raw_bytes = hashlib.sha256(verify_key.encode()).digest()
+                octra_address = "oct" + base64.b64encode(address_raw_bytes).decode()
+                
+                return sk, pub_key_b64, octra_address
+            except Exception:
+                return None, None, None 
         else:
             return None, None, None # Bukan seed phrase yang valid
-    except Exception as e:
-        # print(f"Error deriving keys: {e}")
+    except Exception: # Tangkap semua error lain yang tidak terduga dalam logika fungsi
         return None, None, None
 
 async def add_account_ui():
+    """UI untuk menambahkan akun dompet baru."""
     cr = sz()
     cls()
     fill()
@@ -143,7 +176,7 @@ async def add_account_ui():
     
     box(x, y, w, hb, "Tambah Akun Baru")
     at(x + 2, y + 2, "Nama Akun (contoh: 'Akun Utama'):", c['y'])
-    account_name = await ainp(x + 2, y + 3)
+    account_name = inp_sync(x + 2, y + 3)
     if not account_name:
         return
 
@@ -152,21 +185,20 @@ async def add_account_ui():
     at(x + 4, y + 7, "[2] Dari Seed Phrase (12/24 Kata)", c['w'])
     at(x + 4, y + 8, "[0] Batal", c['w'])
     at(x + 2, y + 10, "Pilihan: ", c['B'] + c['y'])
-    choice = await ainp(x + 11, y + 10)
+    choice = inp_sync(x + 11, y + 10)
     
     sk_obj, pub_key_b64, octra_addr = None, None, None
     input_value = None
 
     if choice == '1':
         at(x + 2, y + 12, "Masukkan Private Key (Base64 Encoded):", c['y'])
-        input_value = await ainp(x + 2, y + 13)
+        input_value = inp_sync(x + 2, y + 13)
         if input_value:
             sk_obj, pub_key_b64, octra_addr = derive_octra_keys(input_value)
     elif choice == '2':
         at(x + 2, y + 12, "Masukkan Seed Phrase (pisahkan dengan spasi):", c['y'])
-        input_value = await ainp(x + 2, y + 13)
+        input_value = inp_sync(x + 2, y + 13)
         if input_value:
-            # Di sini Anda bisa meminta path derivasi jika ingin lebih fleksibel
             sk_obj, pub_key_b64, octra_addr = derive_octra_keys(input_value)
     elif choice == '0':
         return
@@ -174,8 +206,8 @@ async def add_account_ui():
     if sk_obj and octra_addr and pub_key_b64:
         loaded_accounts.append({
             'name': account_name,
-            'priv_raw': input_value, # Simpan raw input, JANGAN simpan dalam file tanpa enkripsi!
-            'priv': base64.b64encode(sk_obj.encode()).decode(), # Ini yang akan digunakan untuk signing
+            'priv_raw': input_value, # Simpan raw input - JANGAN simpan dalam file tanpa enkripsi!
+            'priv': base64.b64encode(sk_obj.encode()).decode(), # Ini akan digunakan untuk signing
             'addr': octra_addr,
             'pub': pub_key_b64,
             'sk_obj': sk_obj # Simpan objek SigningKey langsung
@@ -187,29 +219,28 @@ async def add_account_ui():
             set_active_account(0)
     else:
         at(x + 2, y + 15, "✗ Gagal menambahkan akun. Input tidak valid atau format salah.", c['bgr'] + c['w'])
-    await awaitkey()
+    wait_sync()
 
 def set_active_account(idx):
+    """Menetapkan akun yang ditentukan sebagai akun yang sedang aktif."""
     global current_account_idx, sk, pub, h, cb, cn, lu, lh
     if 0 <= idx < len(loaded_accounts):
         current_account_idx = idx
         active_account = loaded_accounts[idx]
-        # Perbarui variabel global yang digunakan oleh fungsi lain
         globals()['priv'] = active_account['priv']
         globals()['addr'] = active_account['addr']
         globals()['sk'] = active_account['sk_obj']
         globals()['pub'] = active_account['pub']
         
-        # Reset cache saldo dan history untuk akun baru
+        # Reset cache saldo dan riwayat untuk akun baru
         cb, cn, lu, lh = None, None, 0, 0
         h.clear()
         
-        # Optional: update RPC jika setiap akun punya RPC berbeda
-        # globals()['rpc'] = active_account.get('rpc', 'http://localhost:8080')
         return True
     return False
 
 async def switch_account_ui():
+    """UI untuk beralih antar akun yang dimuat."""
     cr = sz()
     cls()
     fill()
@@ -221,7 +252,7 @@ async def switch_account_ui():
     
     if not loaded_accounts:
         at(x + 2, y + 2, "Tidak ada akun yang dimuat.", c['y'])
-        await awaitkey()
+        wait_sync()
         return
 
     at(x + 2, y + 2, "Akun yang Tersedia:", c['c'])
@@ -230,11 +261,11 @@ async def switch_account_ui():
         at(x + 4, y + 4 + i, f"[{i+1}] {acc['name']} ({acc['addr'][:10]}...){status}", c['w'] if i != current_account_idx else c['B'] + c['g'])
     
     at(x + 2, y + 4 + len(loaded_accounts) + 1, "Pilih nomor akun (0 untuk batal):", c['y'])
-    choice = await ainp(x + 2, y + 4 + len(loaded_accounts) + 2)
+    choice = inp_sync(x + 2, y + 4 + len(loaded_accounts) + 2)
     
     try:
         idx = int(choice) - 1
-        if idx == -1: # Batal
+        if idx == -1:
             return
         if set_active_account(idx):
             at(x + 2, y + 4 + len(loaded_accounts) + 4, f"✓ Akun beralih ke '{loaded_accounts[idx]['name']}'", c['bgg'] + c['w'])
@@ -242,22 +273,111 @@ async def switch_account_ui():
             at(x + 2, y + 4 + len(loaded_accounts) + 4, "✗ Pilihan tidak valid.", c['bgr'] + c['w'])
     except ValueError:
         at(x + 2, y + 4 + len(loaded_accounts) + 4, "✗ Masukkan nomor yang valid.", c['bgr'] + c['w'])
-    await awaitkey()
+    wait_sync()
 
-# --- Akhir Fungsi Manajemen Akun Baru ---
-
-# --- Bagian LD (Load Wallet) yang dimodifikasi ---
+# --- Fungsi Muat Dompet (Dimodifikasi untuk multi-akun dari wallet.json) ---
 def ld():
-    # Fungsi ld() asli akan diubah untuk memuat *akun default* atau memberi pilihan.
-    # Untuk contoh multi-akun ini, kita akan melewati ld() awal dan langsung ke menu akun.
-    # Namun, jika Anda ingin menyimpan dan memuat daftar akun, Anda perlu:
-    # 1. Mengenkripsi seluruh 'loaded_accounts' list sebelum menyimpannya ke disk.
-    # 2. Mendekripsi saat memuat.
-    # Ini memerlukan password dari pengguna.
-    # Sebagai permulaan, kita akan biarkan loaded_accounts kosong di awal dan tambahkan secara manual.
-    return True # Selalu kembalikan True karena kita akan memuat akun nanti.
+    """
+    Mencoba memuat akun dari wallet.json.
+    Mendukung objek dompet tunggal atau daftar objek dompet.
+    """
+    global priv, addr, rpc, sk, pub, loaded_accounts, current_account_idx
+    
+    # Kosongkan daftar akun yang sudah dimuat sebelumnya
+    loaded_accounts.clear() 
+    current_account_idx = -1
 
-# --- Fungsi yang sudah ada (tidak banyak berubah, tapi akan menggunakan variabel global 'priv', 'addr', 'sk', 'pub') ---
+    try:
+        wallet_path = os.path.expanduser("~/.octra/wallet.json")
+        if not os.path.exists(wallet_path):
+            wallet_path = "wallet.json"
+        
+        with open(wallet_path, 'r') as f:
+            data = json.load(f)
+        
+        # Periksa apakah data adalah daftar (multi-akun) atau objek tunggal (satu akun lama)
+        wallets_to_load = []
+        if isinstance(data, list):
+            wallets_to_load = data
+        elif isinstance(data, dict):
+            # Jika itu objek tunggal (format lama), bungkus dalam daftar
+            wallets_to_load.append(data)
+        else:
+            print(f"{c['R']}Error: Format wallet.json tidak dikenal (bukan objek atau daftar).{c['r']}")
+            return False
+
+        if not wallets_to_load:
+            print(f"{c['y']}Peringatan: wallet.json kosong atau tidak berisi akun. Anda perlu menambah akun secara manual (opsi 'A').{c['r']}")
+            return True # Izinkan skrip untuk melanjutkan
+
+        accounts_loaded_count = 0
+        for i, d in enumerate(wallets_to_load):
+            priv_b64 = d.get('priv')
+            loaded_addr = d.get('addr')
+            loaded_rpc_per_account = d.get('rpc', 'https://octra.network') # RPC bisa per akun
+
+            if not priv_b64 or not loaded_addr:
+                print(f"{c['y']}Peringatan: Akun ke-{i+1} di wallet.json tidak lengkap (kunci/alamat hilang). Melewati.{c['r']}")
+                continue
+
+            try:
+                # Coba turunkan kunci dari priv_b64 yang diberikan (asumsi itu adalah seed)
+                sk_obj, derived_pub_b64, derived_octra_addr = derive_octra_keys(priv_b64)
+
+                if not sk_obj: # Jika derivasi gagal
+                    print(f"{c['R']}Error: Private key di akun ke-{i+1} wallet.json tidak valid atau tidak kompatibel. Melewati.{c['r']}")
+                    continue
+                
+                account_name = d.get('name', f"wallet.json_account_{i+1}") # Ambil nama atau buat default
+
+                loaded_accounts.append({
+                    'name': account_name,
+                    'priv_raw': priv_b64, 
+                    'priv': priv_b64,
+                    'addr': loaded_addr, # Gunakan alamat dari file (penting untuk kesesuaian saldo)
+                    'pub': derived_pub_b64, # Gunakan public key yang baru saja diturunkan
+                    'sk_obj': sk_obj
+                })
+                accounts_loaded_count += 1
+
+                # Peringatan jika alamat yang diturunkan berbeda dengan yang di file
+                if derived_octra_addr != loaded_addr:
+                    print(f"{c['y']}Peringatan ({account_name}): Alamat dari wallet.json ({loaded_addr}) berbeda dengan yang diturunkan ({derived_octra_addr}).{c['r']}")
+                    print(f"{c['y']}Ini bisa berarti skema derivasi alamat Octra berbeda. Periksa saldo di Octra Explorer untuk {loaded_addr}.{c['r']}")
+                    time.sleep(1) # Beri waktu pengguna untuk membaca peringatan
+                
+                # Gunakan RPC dari akun pertama yang berhasil dimuat sebagai default global
+                if accounts_loaded_count == 1:
+                    globals()['rpc'] = loaded_rpc_per_account
+                    if not loaded_rpc_per_account.startswith('https://') and 'localhost' not in loaded_rpc_per_account:
+                        print(f"{c['R']}⚠️  WARNING: Menggunakan koneksi HTTP yang tidak aman untuk RPC: {loaded_rpc_per_account}{c['r']}")
+                        time.sleep(1) 
+
+            except Exception as e:
+                print(f"{c['R']}Error saat memproses akun ke-{i+1} dari wallet.json: {e}. Melewati.{c['r']}")
+                continue
+
+        if accounts_loaded_count == 0:
+            print(f"{c['y']}Peringatan: Tidak ada akun yang berhasil dimuat dari wallet.json. Anda perlu menambah akun secara manual (opsi 'A').{c['r']}")
+            return True # Izinkan skrip untuk melanjutkan
+
+        current_account_idx = 0
+        set_active_account(0) # Atur akun pertama yang dimuat sebagai aktif
+        print(f"{c['g']}✓ {accounts_loaded_count} akun berhasil dimuat dari wallet.json.{c['r']}")
+        time.sleep(2) # Beri waktu pengguna untuk melihat pesan
+        return True
+
+    except FileNotFoundError:
+        print(f"{c['y']}Peringatan: wallet.json tidak ditemukan. Anda perlu menambah akun secara manual (opsi 'A').{c['r']}")
+        return True # Izinkan skrip untuk melanjutkan
+    except json.JSONDecodeError:
+        print(f"{c['R']}Error: wallet.json tidak valid (format JSON rusak).{c['r']}")
+        return False
+    except Exception as e:
+        print(f"{c['R']}Error umum saat memuat wallet.json: {e}{c['r']}")
+        return False
+
+# --- Fungsi Kriptografi dan RPC ---
 
 def derive_encryption_key(privkey_b64):
     privkey_bytes = base64.b64decode(privkey_b64)
@@ -276,8 +396,34 @@ def decrypt_client_balance(encrypted_data, privkey_b64):
     if encrypted_data == "0" or not encrypted_data:
         return 0
     
-    # ... (logika dekripsi v1)
-
+    if not encrypted_data.startswith("v2|"):
+        privkey_bytes = base64.b64decode(privkey_b64)
+        salt = b"octra_encrypted_balance_v1"
+        key = hashlib.sha256(salt + privkey_bytes).digest() + hashlib.sha256(privkey_bytes + salt).digest()
+        key = key[:32]
+        
+        try:
+            data = base64.b64decode(encrypted_data)
+            if len(data) < 32:
+                return 0
+            
+            nonce = data[:16]
+            tag = data[16:32]
+            encrypted = data[32:]
+            
+            expected_tag = hashlib.sha256(nonce + encrypted + key).digest()[:16]
+            if not hmac.compare_digest(tag, expected_tag):
+                return 0
+            
+            decrypted = bytearray()
+            key_hash = hashlib.sha256(key + nonce).digest()
+            for i, byte in enumerate(encrypted):
+                decrypted.append(byte ^ key_hash[i % 32])
+            
+            return int(decrypted.decode())
+        except:
+            return 0
+    
     try:
         b64_data = encrypted_data[3:]
         raw = base64.b64decode(b64_data)
@@ -304,7 +450,7 @@ def derive_shared_secret_for_claim(my_privkey_b64, ephemeral_pubkey_b64):
     if eph_pub_bytes < my_pubkey_bytes:
         smaller, larger = eph_pub_bytes, my_pubkey_bytes
     else:
-        smaller, larger = my_pubkey_bytes, eph_pub_bytes
+        larger, smaller = my_pubkey_bytes, eph_pub_bytes
     
     combined = smaller + larger
     round1 = hashlib.sha256(combined).digest()
@@ -340,12 +486,7 @@ async def req(m, p, d=None, t=10):
             json_serialize=json.dumps
         )
     try:
-        # Gunakan RPC dari variabel global 'rpc' yang sudah diatur
-        current_rpc = rpc 
-        # Jika Anda ingin RPC per akun, uncomment baris di bawah ini dan pastikan setiap akun memiliki kunci 'rpc'
-        # if current_account_idx != -1 and loaded_accounts[current_account_idx].get('rpc'):
-        #     current_rpc = loaded_accounts[current_account_idx]['rpc']
-
+        current_rpc = rpc
         url = f"{current_rpc}{p}"
         
         kwargs = {}
@@ -367,19 +508,13 @@ async def req(m, p, d=None, t=10):
         return 0, str(e), None
 
 async def req_private(path, method='GET', data=None):
-    # Mengambil kunci privat dari akun aktif
     current_priv = globals().get('priv')
     if not current_priv:
         return False, {"error": "No active account or private key available."}
         
     headers = {"X-Private-Key": current_priv}
     try:
-        # Gunakan RPC dari variabel global 'rpc' yang sudah diatur
         current_rpc = rpc
-        # Jika Anda ingin RPC per akun, uncomment baris di bawah ini dan pastikan setiap akun memiliki kunci 'rpc'
-        # if current_account_idx != -1 and loaded_accounts[current_account_idx].get('rpc'):
-        #     current_rpc = loaded_accounts[current_account_idx]['rpc']
-            
         url = f"{current_rpc}{path}"
         
         kwargs = {'headers': headers}
@@ -401,15 +536,12 @@ async def req_private(path, method='GET', data=None):
         return False, {"error": str(e)}
 
 async def st():
-    # Fungsi ini sekarang perlu memeriksa akun aktif
     global cb, cn, lu
     
-    # Jika tidak ada akun aktif, tidak bisa mendapatkan status
     if current_account_idx == -1:
         cb, cn, lu = None, None, 0
         return None, None
 
-    # Mengambil addr dari akun aktif
     current_addr = globals().get('addr')
     if not current_addr:
         cb, cn, lu = None, None, 0
@@ -420,7 +552,7 @@ async def st():
         return cn, cb
     
     results = await asyncio.gather(
-        req('GET', f'/balance/{current_addr}'), # Menggunakan current_addr
+        req('GET', f'/balance/{current_addr}'),
         req('GET', '/staging', 5),
         return_exceptions=True
     )
@@ -433,7 +565,7 @@ async def st():
         cb = float(j.get('balance', 0))
         lu = now
         if s2 == 200 and j2:
-            our = [tx for tx in j2.get('staged_transactions', []) if tx.get('from') == current_addr] # Menggunakan current_addr
+            our = [tx for tx in j2.get('staged_transactions', []) if tx.get('from') == current_addr]
             if our:
                 cn = max(cn, max(int(tx.get('nonce', 0)) for tx in our))
     elif s == 404:
@@ -451,8 +583,19 @@ async def st():
             cn, cb = None, None
     return cn, cb
 
+async def get_address_info(address):
+    s, t, j = await req('GET', f'/address/{address}')
+    if s == 200:
+        return j
+    return None
+
+async def get_public_key(address):
+    s, t, j = await req('GET', f'/public_key/{address}')
+    if s == 200:
+        return j.get("public_key")
+    return None
+
 async def get_encrypted_balance():
-    # Mengambil addr dari akun aktif
     current_addr = globals().get('addr')
     if not current_addr:
         return None
@@ -474,7 +617,6 @@ async def get_encrypted_balance():
         return None
 
 async def encrypt_balance(amount):
-    # Menggunakan priv dari akun aktif
     current_priv = globals().get('priv')
     current_addr = globals().get('addr')
     if not current_priv or not current_addr:
@@ -503,7 +645,6 @@ async def encrypt_balance(amount):
         return False, {"error": j.get("error", t) if j else t}
 
 async def decrypt_balance(amount):
-    # Menggunakan priv dari akun aktif
     current_priv = globals().get('priv')
     current_addr = globals().get('addr')
     if not current_priv or not current_addr:
@@ -535,7 +676,6 @@ async def decrypt_balance(amount):
         return False, {"error": j.get("error", t) if j else t}
 
 async def create_private_transfer(to_addr, amount):
-    # Menggunakan priv dan addr dari akun aktif
     current_priv = globals().get('priv')
     current_addr = globals().get('addr')
     current_pub = globals().get('pub')
@@ -565,7 +705,6 @@ async def create_private_transfer(to_addr, amount):
         return False, {"error": j.get("error", t) if j else t}
 
 async def get_pending_transfers():
-    # Menggunakan addr dari akun aktif
     current_addr = globals().get('addr')
     if not current_addr:
         return []
@@ -579,7 +718,6 @@ async def get_pending_transfers():
         return []
 
 async def claim_private_transfer(transfer_id):
-    # Menggunakan priv dan addr dari akun aktif
     current_priv = globals().get('priv')
     current_addr = globals().get('addr')
     if not current_priv or not current_addr:
@@ -598,7 +736,6 @@ async def claim_private_transfer(transfer_id):
         return False, {"error": j.get("error", t) if j else t}
 
 async def gh():
-    # Menggunakan addr dari akun aktif
     global h, lh
     
     current_addr = globals().get('addr')
@@ -632,7 +769,7 @@ async def gh():
                 if tx_hash in existing_hashes:
                     continue
                 
-                ii = p.get('to') == current_addr # Menggunakan current_addr
+                ii = p.get('to') == current_addr
                 ar = p.get('amount_raw', p.get('amount', '0'))
                 a = float(ar) if '.' in str(ar) else int(ar) / μ
                 msg = None
@@ -662,7 +799,6 @@ async def gh():
         lh = now
 
 def mk(to, a, n, msg=None):
-    # Menggunakan sk dan pub dari akun aktif
     current_sk = globals().get('sk')
     current_pub = globals().get('pub')
     current_addr = globals().get('addr')
@@ -685,10 +821,20 @@ def mk(to, a, n, msg=None):
     tx.update(signature=sig, public_key=current_pub)
     return tx, hashlib.sha256(bl.encode()).hexdigest()
 
+async def snd(tx):
+    t0 = time.time()
+    s, t, j = await req('POST', '/send-tx', tx)
+    dt = time.time() - t0
+    if s == 200:
+        if j and j.get('status') == 'accepted':
+            return True, j.get('tx_hash', ''), dt, j
+        elif t.lower().startswith('ok'):
+            return True, t.split()[-1], dt, None
+    return False, json.dumps(j) if j else t, dt, j
+
 async def expl(x, y, w, hb):
     box(x, y, w, hb, "Wallet Explorer")
     
-    # Ambil info dari akun aktif
     if current_account_idx != -1:
         active_acc = loaded_accounts[current_account_idx]
         current_addr = active_acc['addr']
@@ -704,7 +850,7 @@ async def expl(x, y, w, hb):
     at(x + 2, y + 3, "Alamat:", c['c'])
     at(x + 11, y + 3, current_addr, c['w'])
     
-    n, b = await st() # St() akan mengambil data dari akun aktif
+    n, b = await st()
     at(x + 2, y + 4, "Saldo:", c['c'])
     at(x + 11, y + 4, f"{b:.6f} OCT" if b is not None else "---", c['B'] + c['g'] if b else c['w'])
     at(x + 2, y + 5, "Nonce:", c['c'])
@@ -724,7 +870,7 @@ async def expl(x, y, w, hb):
                     at(x + 2, y + 8, "Dapat Diklaim:", c['c'])
                     at(x + 15, y + 8, f"{len(pending)} transfer", c['B'] + c['g'])
         except Exception:
-            pass # Handle error in UI gracefully
+            pass
     else:
         at(x + 2, y + 7, "Terenkripsi:", c['R'])
         at(x + 15, y + 7, "N/A (Pilih akun)", c['B'] + c['R'])
@@ -765,7 +911,6 @@ async def expl(x, y, w, hb):
             at(x + w - 6, y + 15 + display_count, status_text, status_color)
             display_count += 1
 
-
 def menu(x, y, w, h):
     box(x, y, w, h, "Perintah")
     at(x + 2, y + 2, "[1] Kirim Transaksi", c['w'])
@@ -777,8 +922,8 @@ def menu(x, y, w, h):
     at(x + 2, y + 8, "[7] Klaim Transfer", c['w'])
     at(x + 2, y + 9, "[8] Ekspor Kunci", c['w'])
     at(x + 2, y + 10, "[9] Bersihkan Riwayat", c['w'])
-    at(x + 2, y + 11, "[A] Tambah Akun", c['B'] + c['y']) # Menu baru
-    at(x + 2, y + 12, "[S] Ganti Akun", c['B'] + c['y']) # Menu baru
+    at(x + 2, y + 11, "[A] Tambah Akun", c['B'] + c['y'])
+    at(x + 2, y + 12, "[S] Ganti Akun", c['B'] + c['y'])
     at(x + 2, y + 13, "[0] Keluar", c['w'])
     at(x + 2, y + h - 2, "Perintah: ", c['B'] + c['y'])
 
@@ -790,10 +935,10 @@ async def scr():
     at((cr[0] - len(t)) // 2, 1, t, c['B'] + c['w'])
     
     sidebar_w = 28
-    menu(2, 3, sidebar_w, 17) # Tinggikan sedikit menu karena ada pilihan baru
+    menu(2, 3, sidebar_w, 17)
     
-    info_y = 21 # Sesuaikan posisi info box
-    box(2, info_y, sidebar_w, 9) # Sesuaikan tinggi info box
+    info_y = 21
+    box(2, info_y, sidebar_w, 9)
     at(4, info_y + 2, "Lingkungan testnet.", c['y'])
     at(4, info_y + 3, "Diperbarui secara aktif.", c['y'])
     at(4, info_y + 4, "Pantau perubahan!", c['y'])
@@ -803,7 +948,7 @@ async def scr():
     
     explorer_x = sidebar_w + 4
     explorer_w = cr[0] - explorer_x - 2
-    await expl(explorer_x, 3, explorer_w, cr[1] - 6) # eksplorasi akan menggunakan info akun aktif
+    await expl(explorer_x, 3, explorer_w, cr[1] - 6)
     
     at(2, cr[1] - 1, " " * (cr[0] - 4), c['bg'])
     
@@ -812,23 +957,15 @@ async def scr():
     else:
         at(2, cr[1] - 1, f"Akun aktif: {loaded_accounts[current_account_idx]['name']} ({loaded_accounts[current_account_idx]['addr'][:10]}...) | Siap", c['bgg'] + c['w'])
         
-    return await ainp(12, 18) # Sesuaikan posisi input perintah
+    return inp_sync(12, 18)
 
-# --- Fungsi TX, Multi, Encrypt, Decrypt, Private Transfer, Claim, Export ---
-# Fungsi-fungsi ini pada dasarnya akan tetap sama, karena mereka sudah mengambil
-# kunci dan alamat dari variabel global `priv`, `addr`, `sk`, `pub`.
-# Yang penting adalah memastikan `set_active_account` dipanggil setelah beralih akun.
-
-# Contoh: Modifikasi fungsi tx() untuk memeriksa akun aktif
 async def tx():
-    # Periksa apakah ada akun aktif
     if current_account_idx == -1:
         cls()
         at(2,2, "Tidak ada akun aktif. Mohon tambahkan atau pilih akun terlebih dahulu.", c['R'])
-        await awaitkey()
+        wait_sync()
         return
 
-    # Lanjutkan dengan logika tx() asli, yang akan menggunakan priv, addr, sk, pub dari akun aktif
     cr = sz()
     cls()
     fill()
@@ -838,30 +975,30 @@ async def tx():
     box(x, y, w, hb, "Kirim Transaksi")
     at(x + 2, y + 2, "Alamat Tujuan: (atau [esc] untuk batal)", c['y'])
     at(x + 2, y + 3, "─" * (w - 4), c['w'])
-    to = await ainp(x + 2, y + 4)
+    to = inp_sync(x + 2, y + 4)
     if not to or to.lower() == 'esc':
         return
     if not b58.match(to):
         at(x + 2, y + 14, "Alamat tidak valid!", c['bgr'] + c['w'])
         at(x + 2, y + 15, "Tekan Enter untuk kembali...", c['y'])
-        await ainp(x + 2, y + 16)
+        wait_sync()
         return
     at(x + 2, y + 5, f"Kepada: {to}", c['g'])
     at(x + 2, y + 7, "Jumlah: (atau [esc] untuk batal)", c['y'])
     at(x + 2, y + 8, "─" * (w - 4), c['w'])
-    a = await ainp(x + 2, y + 9)
+    a = inp_sync(x + 2, y + 9)
     if not a or a.lower() == 'esc':
         return
     if not re.match(r"^\d+(\.\d+)?$", a) or float(a) <= 0:
         at(x + 2, y + 14, "Jumlah tidak valid!", c['bgr'] + c['w'])
         at(x + 2, y + 15, "Tekan Enter untuk kembali...", c['y'])
-        await ainp(x + 2, y + 16)
+        wait_sync()
         return
     a = float(a)
     at(x + 2, y + 10, f"Jumlah: {a:.6f} OCT", c['g'])
     at(x + 2, y + 12, "Pesan (opsional, maks 1024): (atau Enter untuk melewati)", c['y'])
     at(x + 2, y + 13, "─" * (w - 4), c['w'])
-    msg = await ainp(x + 2, y + 14)
+    msg = inp_sync(x + 2, y + 14)
     if not msg:
         msg = None
     elif len(msg) > 1024:
@@ -870,16 +1007,16 @@ async def tx():
     
     global lu
     lu = 0
-    n, b = await st() # Saldo dan nonce akun aktif
+    n, b = await st()
     if n is None:
         at(x + 2, y + 17, "Gagal mendapatkan nonce!", c['bgr'] + c['w'])
         at(x + 2, y + 18, "Tekan Enter untuk kembali...", c['y'])
-        await ainp(x + 2, y + 19)
+        wait_sync()
         return
     if b is None or b < a:
         at(x + 2, y + 17, f"Saldo tidak mencukupi ({b:.6f} < {a})", c['bgr'] + c['w'])
         at(x + 2, y + 18, "Tekan Enter untuk kembali...", c['y'])
-        await ainp(x + 2, y + 19)
+        wait_sync()
         return
     at(x + 2, y + 16, "─" * (w - 4), c['w'])
     at(x + 2, y + 17, f"Kirim {a:.6f} OCT", c['B'] + c['g'])
@@ -888,7 +1025,7 @@ async def tx():
         at(x + 2, y + 19, f"Pesan: {msg[:50]}{'...' if len(msg) > 50 else ''}", c['c'])
     at(x + 2, y + 20, f"Biaya: {'0.001' if a < 1000 else '0.003'} OCT (nonce: {n + 1})", c['y'])
     at(x + 2, y + 21, "[y]a / [n]o: ", c['B'] + c['y'])
-    if (await ainp(x + 16, y + 21)).strip().lower() != 'y':
+    if (inp_sync(x + 16, y + 21)).strip().lower() != 'y':
         return
     
     spin_task = asyncio.create_task(spin_animation(x + 2, y + 22, "Mengirim transaksi"))
@@ -930,16 +1067,15 @@ async def tx():
     else:
         at(x + 2, y + 20, f"✗ Transaksi gagal!", c['bgr'] + c['w'])
         at(x + 2, y + 21, f"Error: {str(hs)[:w - 10]}", c['R'])
-    await awaitkey()
+    wait_sync()
 
 async def multi():
-    # Periksa apakah ada akun aktif
     if current_account_idx == -1:
         cls()
         at(2,2, "Tidak ada akun aktif. Mohon tambahkan atau pilih akun terlebih dahulu.", c['R'])
-        await awaitkey()
+        wait_sync()
         return
-    # ... Logika multi() asli ...
+
     cr = sz()
     cls()
     fill()
@@ -955,7 +1091,7 @@ async def multi():
     ly = y + 5
     while ly < y + hb - 8:
         at(x + 2, ly, f"[{len(rcp) + 1}] ", c['c'])
-        l = await ainp(x + 7, ly)
+        l = inp_sync(x + 7, ly)
         if l.lower() == 'esc':
             return
         if not l:
@@ -979,15 +1115,15 @@ async def multi():
     if n is None:
         at(x + 2, y + hb - 5, "Gagal mendapatkan nonce!", c['bgr'] + c['w'])
         at(x + 2, y + hb - 4, "Tekan Enter untuk kembali...", c['y'])
-        await ainp(x + 2, y + hb - 3)
+        wait_sync()
         return
     if not b or b < tot:
         at(x + 2, y + hb - 5, f"Saldo tidak mencukupi! ({b:.6f} < {tot})", c['bgr'] + c['w'])
         at(x + 2, y + hb - 4, "Tekan Enter untuk kembali...", c['y'])
-        await ainp(x + 2, y + hb - 3)
+        wait_sync()
         return
     at(x + 2, y + hb - 5, f"Kirim semua? [y/n] (nonce awal: {n + 1}): ", c['y'])
-    if (await ainp(x + 48, y + hb - 5)).strip().lower() != 'y':
+    if (inp_sync(x + 48, y + hb - 5)).strip().lower() != 'y':
         return
     
     spin_task = asyncio.create_task(spin_animation(x + 2, y + hb - 3, "Mengirim transaksi"))
@@ -1007,7 +1143,7 @@ async def multi():
             except ValueError as e:
                 f_total += 1
                 at(x + 55, y + hb - 2, "✗ gagal (kunci)", c['R'])
-                await asyncio.sleep(0.05) # Beri waktu untuk melihat pesan error
+                await asyncio.sleep(0.05)
                 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -1044,16 +1180,15 @@ async def multi():
     lu = 0
     at(x + 2, y + hb - 2, " " * 65, c['bg'])
     at(x + 2, y + hb - 2, f"Selesai: {s_total} sukses, {f_total} gagal", c['bgg'] + c['w'] if f_total == 0 else c['bgr'] + c['w'])
-    await awaitkey()
+    wait_sync()
 
 async def encrypt_balance_ui():
-    # Periksa apakah ada akun aktif
     if current_account_idx == -1:
         cls()
         at(2,2, "Tidak ada akun aktif. Mohon tambahkan atau pilih akun terlebih dahulu.", c['R'])
-        await awaitkey()
+        wait_sync()
         return
-    # ... Logika encrypt_balance_ui() asli ...
+
     cr = sz()
     cls()
     fill()
@@ -1068,7 +1203,7 @@ async def encrypt_balance_ui():
     
     if not enc_data:
         at(x + 2, y + 10, "Tidak bisa mendapatkan info saldo terenkripsi", c['R'])
-        await awaitkey()
+        wait_sync()
         return
     
     at(x + 2, y + 2, "Saldo Publik:", c['c'])
@@ -1082,16 +1217,16 @@ async def encrypt_balance_ui():
     
     at(x + 2, y + 6, "─" * (w - 4), c['w'])
     
-    max_encrypt = enc_data['public_raw'] / μ - 1.0 # Asumsi biaya 1 OCT untuk enkripsi
+    max_encrypt = enc_data['public_raw'] / μ - 1.0
     if max_encrypt <= 0:
         at(x + 2, y + 8, "Saldo publik tidak mencukupi (butuh > 1 OCT untuk biaya)", c['R'])
-        await awaitkey()
+        wait_sync()
         return
     
     at(x + 2, y + 7, f"Maksimal yang bisa dienkripsi: {max_encrypt:.6f} OCT", c['y'])
     
     at(x + 2, y + 9, "Jumlah yang akan dienkripsi:", c['y'])
-    amount = await ainp(x + 21, y + 9)
+    amount = inp_sync(x + 21, y + 9)
     
     if not amount or not re.match(r"^\d+(\.\d+)?$", amount) or float(amount) <= 0:
         return
@@ -1099,11 +1234,11 @@ async def encrypt_balance_ui():
     amount = float(amount)
     if amount > max_encrypt:
         at(x + 2, y + 11, f"Jumlah terlalu besar (maks: {max_encrypt:.6f})", c['R'])
-        await awaitkey()
+        wait_sync()
         return
     
     at(x + 2, y + 11, f"Enkripsi {amount:.6f} OCT? [y/n]:", c['B'] + c['y'])
-    if (await ainp(x + 30, y + 11)).strip().lower() != 'y':
+    if (inp_sync(x + 30, y + 11)).strip().lower() != 'y':
         return
     
     spin_task = asyncio.create_task(spin_animation(x + 2, y + 14, "Menenkripsi saldo"))
@@ -1123,16 +1258,15 @@ async def encrypt_balance_ui():
     else:
         at(x + 2, y + 14, f"✗ Error: {result.get('error', 'unknown')}", c['bgr'] + c['w'])
     
-    await awaitkey()
+    wait_sync()
 
 async def decrypt_balance_ui():
-    # Periksa apakah ada akun aktif
     if current_account_idx == -1:
         cls()
         at(2,2, "Tidak ada akun aktif. Mohon tambahkan atau pilih akun terlebih dahulu.", c['R'])
-        await awaitkey()
+        wait_sync()
         return
-    # ... Logika decrypt_balance_ui() asli ...
+
     cr = sz()
     cls()
     fill()
@@ -1147,7 +1281,7 @@ async def decrypt_balance_ui():
     
     if not enc_data:
         at(x + 2, y + 10, "Tidak bisa mendapatkan info saldo terenkripsi", c['R'])
-        await awaitkey()
+        wait_sync()
         return
     
     at(x + 2, y + 2, "Saldo Publik:", c['c'])
@@ -1163,14 +1297,14 @@ async def decrypt_balance_ui():
     
     if enc_data['encrypted_raw'] == 0:
         at(x + 2, y + 8, "Tidak ada saldo terenkripsi untuk didekripsi", c['R'])
-        await awaitkey()
+        wait_sync()
         return
     
     max_decrypt = enc_data['encrypted_raw'] / μ
     at(x + 2, y + 7, f"Maksimal yang bisa didekripsi: {max_decrypt:.6f} OCT", c['y'])
     
     at(x + 2, y + 9, "Jumlah yang akan didekripsi:", c['y'])
-    amount = await ainp(x + 21, y + 9)
+    amount = inp_sync(x + 21, y + 9)
     
     if not amount or not re.match(r"^\d+(\.\d+)?$", amount) or float(amount) <= 0:
         return
@@ -1178,11 +1312,11 @@ async def decrypt_balance_ui():
     amount = float(amount)
     if amount > max_decrypt:
         at(x + 2, y + 11, f"Jumlah terlalu besar (maks: {max_decrypt:.6f})", c['R'])
-        await awaitkey()
+        wait_sync()
         return
     
     at(x + 2, y + 11, f"Dekripsi {amount:.6f} OCT? [y/n]:", c['B'] + c['y'])
-    if (await ainp(x + 30, y + 11)).strip().lower() != 'y':
+    if (inp_sync(x + 30, y + 11)).strip().lower() != 'y':
         return
     
     spin_task = asyncio.create_task(spin_animation(x + 2, y + 14, "Mendekripsi saldo"))
@@ -1202,16 +1336,15 @@ async def decrypt_balance_ui():
     else:
         at(x + 2, y + 14, f"✗ Error: {result.get('error', 'unknown')}", c['bgr'] + c['w'])
     
-    await awaitkey()
+    wait_sync()
 
 async def private_transfer_ui():
-    # Periksa apakah ada akun aktif
     if current_account_idx == -1:
         cls()
         at(2,2, "Tidak ada akun aktif. Mohon tambahkan atau pilih akun terlebih dahulu.", c['R'])
-        await awaitkey()
+        wait_sync()
         return
-    # ... Logika private_transfer_ui() asli ...
+
     cr = sz()
     cls()
     fill()
@@ -1225,23 +1358,23 @@ async def private_transfer_ui():
     if not enc_data or enc_data['encrypted_raw'] == 0:
         at(x + 2, y + 10, "Tidak ada saldo terenkripsi yang tersedia", c['R'])
         at(x + 2, y + 11, "Enkripsi beberapa saldo terlebih dahulu", c['y'])
-        await awaitkey()
+        wait_sync()
         return
     
     at(x + 2, y + 2, f"Saldo terenkripsi: {enc_data['encrypted']:.6f} OCT", c['g'])
     at(x + 2, y + 3, "─" * (w - 4), c['w'])
     
     at(x + 2, y + 5, "Alamat penerima:", c['y'])
-    to_addr = await ainp(x + 2, y + 6)
+    to_addr = inp_sync(x + 2, y + 6)
     
     if not to_addr or not b58.match(to_addr):
         at(x + 2, y + 12, "Alamat tidak valid", c['R'])
-        await awaitkey()
+        wait_sync()
         return
     
-    if to_addr == globals().get('addr'): # Bandingkan dengan alamat akun aktif
+    if to_addr == globals().get('addr'):
         at(x + 2, y + 12, "Tidak bisa mengirim ke diri sendiri", c['R'])
-        await awaitkey()
+        wait_sync()
         return
     
     spin_task = asyncio.create_task(spin_animation(x + 2, y + 8, "Memeriksa penerima"))
@@ -1256,19 +1389,19 @@ async def private_transfer_ui():
     
     if not addr_info:
         at(x + 2, y + 12, "Alamat penerima tidak ditemukan di blockchain", c['R'])
-        await awaitkey()
+        wait_sync()
         return
     
     if not addr_info.get('has_public_key'):
         at(x + 2, y + 12, "Penerima tidak memiliki kunci publik", c['R'])
         at(x + 2, y + 13, "Mereka perlu membuat transaksi terlebih dahulu", c['y'])
-        await awaitkey()
+        wait_sync()
         return
     
     at(x + 2, y + 8, f"Saldo penerima: {addr_info.get('balance', 'unknown')}", c['c'])
     
     at(x + 2, y + 10, "Jumlah:", c['y'])
-    amount = await ainp(x + 10, y + 10)
+    amount = inp_sync(x + 10, y + 10)
     
     if not amount or not re.match(r"^\d+(\.\d+)?$", amount) or float(amount) <= 0:
         return
@@ -1276,7 +1409,7 @@ async def private_transfer_ui():
     amount = float(amount)
     if amount > enc_data['encrypted'] :
         at(x + 2, y + 14, f"Saldo terenkripsi tidak mencukupi", c['R'])
-        await awaitkey()
+        wait_sync()
         return
     
     at(x + 2, y + 12, "─" * (w - 4), c['w'])
@@ -1284,7 +1417,7 @@ async def private_transfer_ui():
     at(x + 2, y + 14, to_addr, c['y'])
     at(x + 2, y + 16, "[y]a / [n]o:", c['B'] + c['y'])
     
-    if (await ainp(x + 15, y + 16)).strip().lower() != 'y':
+    if (inp_sync(x + 15, y + 16)).strip().lower() != 'y':
         return
     
     spin_task = asyncio.create_task(spin_animation(x + 2, y + 18, "Membuat transfer privat"))
@@ -1305,16 +1438,15 @@ async def private_transfer_ui():
     else:
         at(x + 2, y + 18, f"✗ Error: {result.get('error', 'unknown')[:w-10]}", c['bgr'] + c['w'])
     
-    await awaitkey()
+    wait_sync()
 
 async def claim_transfers_ui():
-    # Periksa apakah ada akun aktif
     if current_account_idx == -1:
         cls()
         at(2,2, "Tidak ada akun aktif. Mohon tambahkan atau pilih akun terlebih dahulu.", c['R'])
-        await awaitkey()
+        wait_sync()
         return
-    # ... Logika claim_transfers_ui() asli ...
+
     cr = sz()
     cls()
     fill()
@@ -1336,7 +1468,7 @@ async def claim_transfers_ui():
     
     if not transfers:
         at(x + 2, y + 10, "Tidak ada transfer tertunda", c['y'])
-        await awaitkey()
+        wait_sync()
         return
     
     at(x + 2, y + 2, f"Ditemukan {len(transfers)} transfer yang dapat diklaim:", c['B'] + c['g'])
@@ -1352,7 +1484,6 @@ async def claim_transfers_ui():
         
         if t.get('encrypted_data') and t.get('ephemeral_key'):
             try:
-                # Menggunakan priv dari akun aktif untuk dekripsi
                 current_priv = globals().get('priv') 
                 if current_priv:
                     shared = derive_shared_secret_for_claim(current_priv, t['ephemeral_key'])
@@ -1374,7 +1505,7 @@ async def claim_transfers_ui():
     
     at(x + 2, y + hb - 6, "─" * (w - 4), c['w'])
     at(x + 2, y + hb - 5, "Masukkan nomor untuk mengklaim (0 untuk batal):", c['y'])
-    choice = await ainp(x + 40, y + hb - 5)
+    choice = inp_sync(x + 40, y + hb - 5)
     
     if not choice or choice == '0':
         return
@@ -1408,16 +1539,15 @@ async def claim_transfers_ui():
     except Exception:
         at(x + 2, y + hb - 3, f"Terjadi kesalahan", c['R'])
     
-    await awaitkey()
+    wait_sync()
 
 async def exp():
-    # Periksa apakah ada akun aktif
     if current_account_idx == -1:
         cls()
         at(2,2, "Tidak ada akun aktif. Mohon tambahkan atau pilih akun terlebih dahulu.", c['R'])
-        await awaitkey()
+        wait_sync()
         return
-    # ... Logika exp() asli ...
+
     cr = sz()
     cls()
     fill()
@@ -1426,7 +1556,6 @@ async def exp():
     y = (cr[1] - hb) // 2
     box(x, y, w, hb, "Ekspor Kunci")
     
-    # Ambil info dari akun aktif
     active_acc = loaded_accounts[current_account_idx]
     current_priv = active_acc['priv']
     current_addr = active_acc['addr']
@@ -1446,7 +1575,7 @@ async def exp():
     at(x + 2, y + 11, "[0] Batal", c['w'])
     at(x + 2, y + 13, "Pilihan: ", c['B'] + c['y'])
     
-    choice = await ainp(x + 10, y + 13)
+    choice = inp_sync(x + 10, y + 13)
     choice = choice.strip()
     
     if choice == '1':
@@ -1462,7 +1591,7 @@ async def exp():
         at(x + 2, y + 9, current_priv[32:], c['R'])
         at(x + 2, y + 11, "Public Key:", c['g'])
         at(x + 2, y + 12, current_pub[:44] + "...", c['g'])
-        await awaitkey()
+        wait_sync()
         
     elif choice == '2':
         fn = f"octra_wallet_{active_acc['name'].replace(' ', '_')}_{int(time.time())}.json"
@@ -1470,7 +1599,7 @@ async def exp():
             'priv': current_priv,
             'addr': current_addr,
             'pub': current_pub,
-            'rpc': rpc # Menggunakan RPC global, atau bisa juga current_acc['rpc'] jika diatur per akun
+            'rpc': rpc
         }
         os.umask(0o077)
         with open(fn, 'w') as f:
@@ -1484,7 +1613,7 @@ async def exp():
         at(x + 2, y + 13, " " * (w - 4), c['bg'])
         at(x + 2, y + 9, f"Disimpan ke {fn}", c['g'])
         at(x + 2, y + 11, "File mengandung private key - Jaga Keamanan!", c['R'])
-        await awaitkey()
+        wait_sync()
         
     elif choice == '3':
         try:
@@ -1496,7 +1625,7 @@ async def exp():
             at(x + 2, y + 7, " " * (w - 4), c['bg'])
             at(x + 2, y + 9, "Clipboard tidak tersedia", c['R'])
         at(x + 2, y + 11, " " * (w - 4), c['bg'])
-        await awaitkey()
+        wait_sync()
 
 def signal_handler(sig, frame):
     stop_flag.set()
@@ -1507,13 +1636,15 @@ def signal_handler(sig, frame):
 async def main():
     global session
     
+    print("\n--- KAZMIGHT CLIENT OCTRA DIMULAI ---")
+    sys.stdout.flush()
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    if not ld(): # ld() sekarang hanya inisialisasi dasar
+    if not ld():
         sys.exit("[!] Terjadi kesalahan inisialisasi klien.")
     
-    # Loop utama
     try:
         while not stop_flag.is_set():
             cmd = await scr()
@@ -1547,51 +1678,34 @@ async def main():
             elif cmd in ['0', 'q', '']:
                 break
     except Exception as e:
-        # Tangani pengecualian secara umum untuk mencegah crash CLI
         cls()
-        print(f"{c['R']}Terjadi kesalahan fatal: {e}{c['r']}")
+        print(f"\n{c['R']}Terjadi kesalahan fatal: {e}{c['r']}")
         import traceback
         traceback.print_exc()
-        wait()
+        wait_sync()
     finally:
         if session:
             await session.close()
-        executor.shutdown(wait=False)
+        sys.exit(0)
 
 if __name__ == "__main__":
     import warnings
     warnings.filterwarnings("ignore", category=ResourceWarning)
     
-    # Ini adalah bagian kritis untuk HDWallet
-    # Anda harus memastikan bahwa 'OCTRA' memiliki BIP44_COIN_TYPE yang benar.
-    # Jika Octra belum memiliki standar BIP44 coin_type, 60 (Ethereum) adalah placeholder.
-    # Jika Octra menggunakan kurva lain selain Ed25519 (nacl), Anda harus mengganti nacl.signing.SigningKey
-    # dengan pustaka yang sesuai.
     try:
-        # Coba akses symbol OCTRA dari hdwallet.symbols
-        from hdwallet.symbols import SYMBOL_LIST
-        if "OCTRA" not in SYMBOL_LIST:
-            # Jika tidak ada, definisikan kelas placeholder OCTRA
-            # Ini hanya untuk mencegah error di `hdwallet = HDWallet(symbol=OCTRA)`
-            # Namun, pastikan coin_type ini benar untuk Octra di dunia nyata.
-            class OCTRA:
-                BIP44_COIN_TYPE = 60 # Placeholder
-            print(f"{c['y']}Peringatan: Simbol 'OCTRA' tidak ditemukan di hdwallet. Menggunakan ETH's BIP44 coin type sebagai fallback ({OCTRA.BIP44_COIN_TYPE}).{c['r']}")
-    except ImportError:
-        # Jika hdwallet.symbols tidak dapat diimpor (misalnya, versi lama atau instalasi yang salah)
-        class OCTRA:
-            BIP44_COIN_TYPE = 60 # Placeholder
-        print(f"{c['y']}Peringatan: hdwallet.symbols tidak dapat diimpor. Menggunakan ETH's BIP44 coin type sebagai fallback ({OCTRA.BIP44_COIN_TYPE}).{c['r']}")
+        print(f"{c['y']}Peringatan: Simbol 'OCTRA' menggunakan BIP44 coin type Ethereum sebagai fallback ({OCTRA.BIP44_COIN_TYPE}). Mohon verifikasi coin type Octra yang benar.{c['r']}")
+        sys.stdout.flush()
     except Exception as e:
         print(f"{c['y']}Peringatan umum saat menyiapkan HDWallet: {e}. Fungsi seed mungkin terpengaruh.{c['r']}")
+        sys.stdout.flush()
 
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+        print(f"\n{c['y']}Keluar...{c['r']}")
         pass
     except Exception:
         pass
     finally:
         cls()
         print(f"{c['r']}")
-        os._exit(0)
