@@ -40,8 +40,6 @@ Untuk memuat dompet secara otomatis saat startup, buat file wallet.json di direk
 
 Contoh wallet.json (MULTI-AKUN):
 ```bash
-JSON
-
 [
   {
     "name": "Octra Main",
