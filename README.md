@@ -1,4 +1,4 @@
-## 🚀 Octra CLI Wallet - Multi-Akun (v0.1.0) 🚀
+## 🚀 Octra Pre Client CLI Wallet - Multi-Akun (v0.1.0) 🚀
 
 Selamat datang di Octra CLI Wallet, sebuah command-line interface (CLI) yang kuat dan menarik untuk mengelola aset Octra Anda langsung dari terminal. Dirancang untuk efisiensi dan kemudahan penggunaan, wallet ini mendukung multi-akun, memungkinkan Anda beralih di antara dompet dengan lancar, serta melakukan transaksi publik dan privat.
 Proyek ini dibangun untuk pengujian di jaringan testnet Octra dan terus diperbarui. Selalu pantau perubahan dan gunakan dengan hati-hati untuk dana non-signifikan.
