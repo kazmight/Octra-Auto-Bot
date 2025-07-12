@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 import json, base64, hashlib, time, sys, re, os, shutil, asyncio, aiohttp, threading
 from datetime import datetime, timedelta
 import nacl.signing
